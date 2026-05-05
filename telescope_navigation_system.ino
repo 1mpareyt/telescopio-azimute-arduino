@@ -48,6 +48,7 @@ float magZ_filtrado = 0.0;
 float pitch_filtrado = 0.0;
 float roll_filtrado = 0.0; 
 unsigned long tempo_ultimo_ciclo = 0; 
+unsigned long tempo_ultima_impressao = 0;
 
 // --- VARIÁVEIS DE NAVEGAÇÃO --- 
 float azimute_alvo = 90.0; // Sua "posição x" externa (ex: Leste)
@@ -168,9 +169,13 @@ void loop() {
   navegarParaAlvo();
 
 
-  Serial.print("Pitch: "); Serial.print(pitch_filtrado, 1);
-  Serial.print(" | Roll: "); Serial.print(roll_filtrado, 1);
-  Serial.print(" | Azimute: "); Serial.println(azimute_estavel, 1);
+  if(millis() - tempo_ultima_impressao >= 500) {
+    Serial.print("Pitch: "); Serial.print(pitch_filtrado, 1);
+    Serial.print(" | Roll: "); Serial.print(roll_filtrado, 1);
+    Serial.print(" | Azimute: "); Serial.println(azimute_estavel, 1) ; 
+  }
+
+    
   delay(30);//ajustar
 
 }
