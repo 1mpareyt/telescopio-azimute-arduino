@@ -128,12 +128,11 @@ void loop() {
   float ax, ay, az, gx, gy, gz;
   lerMPU(ax, ay, az, gx, gy, gz);
 
-  float pitch_accel = atan2(ax, sqrt(ax * ax + az * az)) * RAD_TO_DEG;
-  float roll_accel  = atan2(ay, az) * RAD_TO_DEG;
+  float pitch_accel = atan2(ax, sqrt(ay * ay + az * az)) * RAD_TO_DEG; 
+  float roll_accel = atan2(ay, az) * RAD_TO_DEG; 
 
   pitch_filtrado = ALPHA_MPU * (pitch_filtrado + gy * dt) + (1.0 - ALPHA_MPU) * pitch_accel;
-  roll_filtrado  = ALPHA_MPU * (roll_filtrado + gx * dt)+ (1.0 - ALPHA_MPU) * roll_accel;
-  
+  roll_filtrado  = ALPHA_MPU * (roll_filtrado + gx * dt)  + (1.0 - ALPHA_MPU) * roll_accel;
 
   float pitch_rad = pitch_filtrado * DEG_TO_RAD;
   float roll_rad = roll_filtrado * DEG_TO_RAD;
