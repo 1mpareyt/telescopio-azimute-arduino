@@ -1,19 +1,29 @@
 #include <Wire.h>
 #include <math.h>
 
+
+
 const int QMC_ADDR = 0x0D;             // Endereço I2C do chip QMC5883L           
 const int MPU_ADDR = 0x68;             // Endereço I2C do chip MPU-6050
 
 
 // ===== PARÂMETROS DE CALIBRAÇÃO / CONSTANTES =====
-const float ALPHA_QMC = 0.90; // Filtro Passa-Baixa QMC
+const float ALPHA_QMC = 0.95; // Filtro Passa-Baixa QMC
 const float ALPHA_MPU = 0.98; // Filtro Complementar
 const float SENS_ACCEL = 16384.0; // Escala +/- 2g 
 const float SENS_GYRO  = 131.0;   // Escala +/- 250 °/s 
-const float RAD_TO_DEG = 57.2957;
-const float DEG_TO_RAD = 0.01745329;
-const float declinacao = -23.0;        // Declinação magnética 
-
+//const float RAD_TO_DEG = 57.2957;
+//const float DEG_TO_RAD = 0.01745329;
+const float declinacao = 0.0;        // Declinação magnética da cidade
+const float DEADBAND = 1.0;     //Margem de erro tolerada em graus 
+const float TOLERANCIA_AZIMUTE = 3.0; // Margem de erro aceitável (em graus)
+const float TOLERANCIA_PITCH = 2.0; // Margem de erro para altitude
+const float azimute_alvo = 90.0; // "posição x" externa
+float pitch_alvo = 0.0;  // Inclinação alvo
+float pitch_estavel = 0.0;    
+float altura_alvo = 20.0; 
+float altura_atual = 20.0;
+float distancia_horizontal = 300.0;
 
 // Variáveis para rastrear os extremos do QMC
 int16_t mx_min = 32767, mx_max = -32768;
@@ -40,18 +50,23 @@ float offsetAZ =0;
 
 // --- VARIÁVEIS DE ESTADO --- 
 float azimute_filtrado = 0.0;
+float azimute_estavel = 0.0;
 float magX_filtrado = 0.0;
 float magY_filtrado = 0.0;
 float magZ_filtrado = 0.0;
 float pitch_filtrado = 0.0;
 float roll_filtrado = 0.0; 
 unsigned long tempo_ultimo_ciclo = 0; 
-
+unsigned long tempo_ultima_impressao = 0;
+bool calculo_inicial_impresso = false;
 
 // --- PROTÓTIPOS ---
 void lerQMC(int16_t &mx, int16_t &my, int16_t &mz);
 void lerMPU(float &ax, float &ay, float &az, float &gx, float &gy, float &gz);
-
+float diferencaAngular(float alvo, float atual);
+void calcularPitchAlvo();
+void navegarParaAlvo();
+void navegarParaAltitude();
 void calibrarMPU(int amostras);
 void calibrarQMC();
 
@@ -107,16 +122,17 @@ void setup(){
 void loop() {
   unsigned long tempo_atual = micros();
   float dt = (tempo_atual - tempo_ultimo_ciclo) / 1000000.0;
+  if (dt <= 0 || dt > 0.1) dt = 0.01;
   tempo_ultimo_ciclo = tempo_atual;
 
   float ax, ay, az, gx, gy, gz;
   lerMPU(ax, ay, az, gx, gy, gz);
 
-  float pitch_accel = atan2(-ax, sqrt(ay * ay + az * az)) * RAD_TO_DEG; 
+  float pitch_accel = atan2(ax, sqrt(ay * ay + az * az)) * RAD_TO_DEG; 
   float roll_accel = atan2(ay, az) * RAD_TO_DEG; 
 
-  pitch_filtrado = ALPHA_MPU * (pitch_filtrado + gx * dt) + (1.0 - ALPHA_MPU) * pitch_accel;
-  roll_filtrado  = ALPHA_MPU * (roll_filtrado + gy * dt)  + (1.0 - ALPHA_MPU) * roll_accel;
+  pitch_filtrado = ALPHA_MPU * (pitch_filtrado + gy * dt) + (1.0 - ALPHA_MPU) * pitch_accel;
+  roll_filtrado  = ALPHA_MPU * (roll_filtrado + gx * dt)  + (1.0 - ALPHA_MPU) * roll_accel;
 
   float pitch_rad = pitch_filtrado * DEG_TO_RAD;
   float roll_rad = roll_filtrado * DEG_TO_RAD;
@@ -147,17 +163,56 @@ void loop() {
   float Yh = magY_filtrado * cos(roll_rad) + magZ_filtrado * sin(roll_rad);
 
 	float azimute = atan2(Yh,Xh) * RAD_TO_DEG;//Calculo do ângulo já com a transformação em graus
-	azimute += declinacao; //Aplicando a declinação magnética de vitoria da conquista
+	//azimute += declinacao; //Aplicando a declinação magnética de vitoria da conquista
 
 	//Ajuste de quadrante: converte ângulos negativos para 0 até 360
   if (azimute < 0) azimute += 360;
   if (azimute >= 360) azimute -= 360;
 
+//Filtros de deadband (zona morta)
+  float erro_pitch_estabilidade = pitch_filtrado - pitch_estavel;
+  if (abs(erro_pitch_estabilidade) > 0.5 ) {
+    pitch_estavel = pitch_filtrado;
+  }
+  float erro_azimute = diferencaAngular(azimute, azimute_estavel);
+  if(abs(erro_azimute)> DEADBAND){
+    azimute_estavel = azimute;
+  }
 
-  Serial.print("Pitch: "); Serial.print(pitch_filtrado, 1);
-  Serial.print(" | Roll: "); Serial.print(roll_filtrado, 1);
-  Serial.print(" | Azimute: "); Serial.println(azimute, 1);
-  delay(30);//ajustar
+//Inlcinação alvo
+  calcularPitchAlvo();
+
+  navegarParaAlvo();
+  navegarParaAltitude();
+
+  if (!calculo_inicial_impresso) {
+
+    float erro_direcao = diferencaAngular(azimute_alvo, azimute_estavel);
+    float erro_pitch = calcularErroPitch(pitch_alvo, pitch_estavel);
+
+    Serial.println("====== POSICAO INICIAL IDENTIFICADA ======");
+
+    Serial.print("Azimute atual: ");
+    Serial.print(azimute_estavel, 1);
+
+    Serial.print(" | Alvo Az: ");
+    Serial.print(azimute_alvo, 1);
+
+    Serial.print(" | Erro Az: ");
+    Serial.print(erro_direcao, 1);
+
+
+    Serial.print(" || Pitch atual: ");
+    Serial.print(pitch_estavel, 1);
+
+    Serial.print(" | Pitch Alvo: ");
+    Serial.print(pitch_alvo, 1);
+
+    Serial.print(" | Erro Pitch: ");
+    Serial.print(erro_pitch, 1);
+
+    calculo_inicial_impresso = true;
+}
 
 }
 
@@ -254,6 +309,11 @@ void lerQMC(int16_t &mx, int16_t &my, int16_t &mz){
 	    mz= z_lsb | (z_msb << 8);
 	
   }
+  else {   
+    mx = 0;
+    my = 0;
+    mz = 0;
+}
 }
 void calibrarQMC(){
   unsigned long star = millis();
@@ -299,3 +359,78 @@ void calibrarQMC(){
   Serial.print("scale_y: "); Serial.println(scale_y);
 }
 
+//calculo para caminho mais curto
+float diferencaAngular(float alvo, float atual) {
+  float diff = alvo - atual;
+//se a diferença do alvo para o o estado atual for maior que 180, ele deve subitrair a diferença  com 360, ele subtrai pois o caminho mais curto é o contrario do ciruculo trigonometrico (sentido horario)
+  while (diff > 180) diff -= 360;
+//se a diferença do alvo para o o estado atual for menor que 180, ele deve somar a diferença  com 360, ele soma pois o caminho mais curto (sentido horario)
+  while (diff < -180) diff += 360;
+  return diff;
+}
+
+void navegarParaAlvo() {
+  float erro = diferencaAngular(azimute_alvo, azimute_estavel);
+  static int ultima_acao = 0; 
+  int acao_atual = 0;
+
+  if (abs(erro) <= TOLERANCIA_AZIMUTE) {
+    acao_atual = 1; // ALINHADO
+  } else if (erro > 0) {
+    acao_atual = 2; // VIRAR DIREITA
+  } else {
+    acao_atual = 3; // VIRAR ESQUERDA
+  }
+
+  if (acao_atual != ultima_acao) {
+    Serial.print("----> ACAO: ");
+    
+    if (acao_atual == 1) {
+      Serial.println("ALINHADO");
+    } else if (acao_atual == 2) {
+      Serial.println("VIRAR DIREITA");
+    } else if (acao_atual == 3) {
+      Serial.println("VIRAR ESQUERDA");
+    }
+    ultima_acao = acao_atual;
+  }
+}
+
+float calcularErroPitch(float alvo, float atual) {
+    return alvo - atual;
+}
+
+void navegarParaAltitude() {
+  float erro_p = calcularErroPitch(pitch_alvo, pitch_estavel);
+  static int ultima_acao_pitch = 0; 
+  int acao_atual_pitch = 0;
+
+  if (abs(erro_p) <= TOLERANCIA_PITCH) {
+    acao_atual_pitch = 1; // ALTITUDE OK
+  } 
+  else if (erro_p > 0) {
+    acao_atual_pitch = 2; // SUBIR (Pitch Up)
+  } 
+  else {
+    acao_atual_pitch = 3; // DESCER (Pitch Down)
+  }
+
+  if (acao_atual_pitch != ultima_acao_pitch) {
+    Serial.print("----> PITCH: ");
+    if (acao_atual_pitch == 1) {
+      Serial.println("[ ALTITUDE OK ]");
+    } 
+    else if (acao_atual_pitch == 2) {
+      Serial.println("[ SUBIR ]");
+    } 
+    else if (acao_atual_pitch == 3) {
+      Serial.println("[ DESCER ]");
+    }
+    ultima_acao_pitch = acao_atual_pitch;
+  }
+}
+
+void calcularPitchAlvo() {
+    float delta_altura = altura_alvo - altura_atual;
+    pitch_alvo = atan2(delta_altura, distancia_horizontal) * RAD_TO_DEG;
+}
